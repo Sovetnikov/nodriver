@@ -12,6 +12,7 @@ import inspect
 import itertools
 import json
 import logging
+import os
 import types
 from asyncio import iscoroutine, iscoroutinefunction
 from typing import Any, Awaitable, Callable, Generator, List, TypeVar, Union
@@ -27,6 +28,15 @@ T = TypeVar("T")
 GLOBAL_DELAY = 0.005
 MAX_SIZE: int = 2**28
 PING_TIMEOUT: int = 900  # 15 minutes
+
+# Default timeout for CDP commands in seconds.
+# Can be set via NODRIVER_DEFAULT_TIMEOUT environment variable.
+DEFAULT_TIMEOUT: float | None = None
+if os.environ.get("NODRIVER_DEFAULT_TIMEOUT"):
+    try:
+        DEFAULT_TIMEOUT = float(os.environ.get("NODRIVER_DEFAULT_TIMEOUT"))
+    except (ValueError, TypeError):
+        pass
 
 TargetType = Union[cdp.target.TargetInfo, cdp.target.TargetID]
 
@@ -420,84 +430,99 @@ class Connection(metaclass=CantTouchThis):
 
     async def _listener(self):
         seen_one = False
-        while True:
-            try:
-                async with self._lock:
-                    raw = await asyncio.wait_for(self.websocket.recv(), 0.05)
-            except ProtocolException:
-                break
-            except websockets.exceptions.ConnectionClosedOK:
-                await self.disconnect()
-                break
-            except websockets.exceptions.ConnectionClosed:
-                await self.disconnect()
-                break
-            except asyncio.TimeoutError as e:
-                await asyncio.sleep(0.05)
-                continue
-            except (Exception,) as e:
-                logger.info(
-                    "error when receiving websocket response: %s" % e, exc_info=True
-                )
-                raise
-            else:
-                message = json.loads(raw)
-                seen_one = True
-                if "id" in message:
-                    tx: Transaction = self.mapper.pop(message["id"])
-                    tx(**message)
-                    logger.debug("got answer for (message_id:%d) => %s", tx.id, message)
+        try:
+            while True:
+                try:
+                    async with self._lock:
+                        raw = await asyncio.wait_for(self.websocket.recv(), 0.05)
+                except ProtocolException:
+                    break
+                except websockets.exceptions.ConnectionClosedOK:
+                    await self.disconnect()
+                    break
+                except websockets.exceptions.ConnectionClosed:
+                    await self.disconnect()
+                    break
+                except asyncio.TimeoutError as e:
+                    await asyncio.sleep(0.05)
+                    continue
+                except (Exception,) as e:
+                    logger.info(
+                        "error when receiving websocket response: %s" % e, exc_info=True
+                    )
+                    raise
                 else:
-                    # probably an event
-                    try:
-                        event = cdp.util.parse_json_event(message)
-                    except Exception as e:
-                        logger.info(
-                            "%s: %s  during parsing of json from event : %s"
-                            % (type(e).__name__, e.args, message),
-                            exc_info=True,
-                        )
-                        continue
-                    except KeyError as e:
-                        logger.info("some lousy KeyError %s" % e, exc_info=True)
-                        continue
-                    try:
-                        if type(event) in self.handlers:
-                            callbacks = self.handlers[type(event)]
-                        else:
+                    message = json.loads(raw)
+                    seen_one = True
+                    if "id" in message:
+                        tx: Transaction = self.mapper.pop(message["id"], None)
+                        if tx:
+                            tx(**message)
+                            logger.debug(
+                                "got answer for (message_id:%d) => %s", tx.id, message
+                            )
+                    else:
+                        # probably an event
+                        try:
+                            event = cdp.util.parse_json_event(message)
+                        except Exception as e:
+                            logger.info(
+                                "%s: %s  during parsing of json from event : %s"
+                                % (type(e).__name__, e.args, message),
+                                exc_info=True,
+                            )
                             continue
-                        if not len(callbacks):
+                        except KeyError as e:
+                            logger.info("some lousy KeyError %s" % e, exc_info=True)
                             continue
-                        for callback in callbacks:
-                            try:
-                                if iscoroutinefunction(callback) or iscoroutine(
-                                    callback
-                                ):
-                                    try:
+                        try:
+                            if type(event) in self.handlers:
+                                callbacks = self.handlers[type(event)]
+                            else:
+                                continue
+                            if not len(callbacks):
+                                continue
+                            for callback in callbacks:
+                                try:
+                                    if iscoroutinefunction(callback) or iscoroutine(
+                                        callback
+                                    ):
+                                        try:
 
-                                        asyncio.create_task(callback(event, self))
-                                    except TypeError as e:
-                                        asyncio.create_task(callback(event))
-                                else:
-                                    try:
-                                        callback(event, self)
-                                    except TypeError:
-                                        callback(event)
-                            except Exception as e:
-                                logger.warning(
-                                    "exception in callback %s for event %s => %s",
-                                    callback,
-                                    event.__class__.__name__,
-                                    e,
-                                    exc_info=True,
-                                )
-                                # since it's handlers, don't raise and screw our program
+                                            asyncio.create_task(callback(event, self))
+                                        except TypeError as e:
+                                            asyncio.create_task(callback(event))
+                                    else:
+                                        try:
+                                            callback(event, self)
+                                        except TypeError:
+                                            callback(event)
+                                except Exception as e:
+                                    logger.warning(
+                                        "exception in callback %s for event %s => %s",
+                                        callback,
+                                        event.__class__.__name__,
+                                        e,
+                                        exc_info=True,
+                                    )
+                                    # since it's handlers, don't raise and screw our program
 
-                    except (Exception,) as e:
-                        raise
+                        except (Exception,) as e:
+                            raise
+        finally:
+            # Fail all pending transactions if the listener stops
+            for tx_id, tx in list(self.mapper.items()):
+                if not tx.done():
+                    tx.set_exception(
+                        Exception("Connection closed or listener loop terminated")
+                    )
+            self.mapper.clear()
 
     async def send(
-        self, cdp_obj: Generator[dict[str, Any], dict[str, Any], Any], _is_update=False
+        self,
+        cdp_obj: Generator[dict[str, Any], dict[str, Any], Any],
+        _is_update=False,
+        timeout: float | None = DEFAULT_TIMEOUT,
     ) -> Any:
         """
         send a protocol command. the commands are made using any of the cdp.<domain>.<method>()'s
@@ -508,6 +533,8 @@ class Connection(metaclass=CantTouchThis):
         :param _is_update: internal flag
             prevents infinite loop by skipping the registeration of handlers
             when multiple calls to connection.send() are made
+        :param timeout: timeout in seconds for this command.
+            defaults to DEFAULT_TIMEOUT (which is None by default)
         :return:
         """
         if self.closed:
@@ -518,8 +545,25 @@ class Connection(metaclass=CantTouchThis):
         the_id = next(self.__count__)
         tx.id = the_id
         self.mapper[the_id] = tx
-        asyncio.create_task(self.websocket.send(tx.message))
-        return await tx
+        try:
+            await self.websocket.send(tx.message)
+        except Exception as e:
+            self.mapper.pop(the_id, None)
+            tx.set_exception(e)
+            raise
+
+        try:
+            return await asyncio.wait_for(tx, timeout=timeout)
+        except asyncio.TimeoutError as e:
+            self.mapper.pop(the_id, None)
+            msg = f"Command {tx.method} (id: {tx.id}) timed out after {timeout} seconds"
+            new_exc = asyncio.TimeoutError(msg)
+            if not tx.done():
+                tx.set_exception(new_exc)
+            raise new_exc from e
+        except Exception:
+            self.mapper.pop(the_id, None)
+            raise
 
     async def _send_oneshot(self, cdp_obj):
         """fire and forget , eg: send command without waiting for any response"""
