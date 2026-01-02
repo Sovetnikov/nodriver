@@ -32,11 +32,32 @@ PING_TIMEOUT: int = 900  # 15 minutes
 # Default timeout for CDP commands in seconds.
 # Can be set via NODRIVER_DEFAULT_TIMEOUT environment variable.
 DEFAULT_TIMEOUT: float | None = None
-if os.environ.get("NODRIVER_DEFAULT_TIMEOUT"):
-    try:
-        DEFAULT_TIMEOUT = float(os.environ.get("NODRIVER_DEFAULT_TIMEOUT"))
-    except (ValueError, TypeError):
-        pass
+
+
+def get_default_timeout() -> float | None:
+    """
+    Helper to get the default timeout from environment variable.
+    This is called if no explicit timeout is provided to Connection.send.
+    """
+    global DEFAULT_TIMEOUT
+    if DEFAULT_TIMEOUT is not None:
+        return DEFAULT_TIMEOUT
+    env_val = os.environ.get("NODRIVER_DEFAULT_TIMEOUT")
+    if env_val:
+        try:
+            return float(env_val)
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
+class _Default:
+    def __repr__(self):
+        return "<DEFAULT>"
+
+
+DEFAULT = _Default()
+
 
 TargetType = Union[cdp.target.TargetInfo, cdp.target.TargetID]
 
@@ -522,7 +543,7 @@ class Connection(metaclass=CantTouchThis):
         self,
         cdp_obj: Generator[dict[str, Any], dict[str, Any], Any],
         _is_update=False,
-        timeout: float | None = DEFAULT_TIMEOUT,
+        timeout: float | None = DEFAULT,
     ) -> Any:
         """
         send a protocol command. the commands are made using any of the cdp.<domain>.<method>()'s
@@ -537,6 +558,8 @@ class Connection(metaclass=CantTouchThis):
             defaults to DEFAULT_TIMEOUT (which is None by default)
         :return:
         """
+        if timeout is DEFAULT:
+            timeout = get_default_timeout()
         if self.closed:
             await self.connect()
         if not _is_update:
