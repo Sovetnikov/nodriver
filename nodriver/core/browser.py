@@ -22,7 +22,7 @@ from typing import List, Tuple, Union
 from .. import cdp
 from . import tab, util
 from ._contradict import ContraDict
-from .config import Config, PathLike, is_posix
+from .config import Config, PathLike, get_default_timeout, is_posix
 from .connection import Connection
 
 logger = logging.getLogger(__name__)
@@ -569,6 +569,19 @@ class Browser:
         return info
 
     async def update_targets(self):
+        """
+        this method is wrapped in a timeout, since it's been reported that
+        in some cases, this method (or the underlying CDP call) can hang,
+        causing the entire process to get stuck on `find_all -> await self -> Tab.sleep`
+        """
+        try:
+            return await asyncio.wait_for(
+                self._update_targets(), timeout=get_default_timeout()
+            )
+        except asyncio.TimeoutError:
+            logger.warning("update_targets timed out")
+
+    async def _update_targets(self):
         targets: List[cdp.target.TargetInfo]
         targets = await self._get_targets()
         target_ids = [t.target_id for t in targets]

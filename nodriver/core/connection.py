@@ -22,42 +22,13 @@ import websockets.asyncio.client
 from .. import cdp
 from . import browser as _browser
 from . import util
+from .config import DEFAULT, get_default_timeout
 
 T = TypeVar("T")
 
 GLOBAL_DELAY = 0.005
 MAX_SIZE: int = 2**28
 PING_TIMEOUT: int = 900  # 15 minutes
-
-# Default timeout for CDP commands in seconds.
-# Can be set via NODRIVER_DEFAULT_TIMEOUT environment variable.
-DEFAULT_TIMEOUT: float | None = None
-
-
-def get_default_timeout() -> float | None:
-    """
-    Helper to get the default timeout from environment variable.
-    This is called if no explicit timeout is provided to Connection.send.
-    """
-    global DEFAULT_TIMEOUT
-    if DEFAULT_TIMEOUT is not None:
-        return DEFAULT_TIMEOUT
-    env_val = os.environ.get("NODRIVER_DEFAULT_TIMEOUT")
-    if env_val:
-        try:
-            return float(env_val)
-        except (ValueError, TypeError):
-            pass
-    return None
-
-
-class _Default:
-    def __repr__(self):
-        return "<DEFAULT>"
-
-
-DEFAULT = _Default()
-
 
 TargetType = Union[cdp.target.TargetInfo, cdp.target.TargetID]
 

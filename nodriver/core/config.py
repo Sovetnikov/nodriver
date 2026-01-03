@@ -20,6 +20,8 @@ __all__ = [
     "is_root",
     "is_posix",
     "PathLike",
+    "get_default_timeout",
+    "DEFAULT",
 ]
 
 logger = logging.getLogger(__name__)
@@ -27,6 +29,35 @@ is_posix = sys.platform.startswith(("darwin", "cygwin", "linux", "linux2"))
 
 PathLike = TypeVar("PathLike", bound=str | pathlib.Path)
 AUTO = None
+
+# Global default timeout for CDP commands and Browser.update_targets in seconds.
+# Can be set via NODRIVER_DEFAULT_TIMEOUT environment variable.
+DEFAULT_TIMEOUT: float | None = None
+
+
+class _Default:
+    def __repr__(self):
+        return "<DEFAULT>"
+
+
+DEFAULT = _Default()
+
+
+def get_default_timeout() -> float | None:
+    """
+    Helper to get the default timeout from environment variable.
+    This is called if no explicit timeout is provided to Connection.send.
+    """
+    global DEFAULT_TIMEOUT
+    if DEFAULT_TIMEOUT is not None:
+        return DEFAULT_TIMEOUT
+    env_val = os.environ.get("NODRIVER_DEFAULT_TIMEOUT")
+    if env_val:
+        try:
+            return float(env_val)
+        except (ValueError, TypeError):
+            pass
+    return None
 
 
 class Config:
