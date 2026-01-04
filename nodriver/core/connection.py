@@ -426,7 +426,11 @@ class Connection(metaclass=CantTouchThis):
             while True:
                 try:
                     async with self._lock:
-                        raw = await asyncio.wait_for(self.websocket.recv(), 0.05)
+                        # wait_for is not used here because it creates short-lived timers
+                        # that can starve the event loop under heavy websocket traffic. Blocking recv()
+                        # is safe for a dedicated listener task; timeouts must be enforced at the
+                        # transaction or caller level, not in the socket read loop.
+                        raw = await self.websocket.recv()
                 except ProtocolException:
                     break
                 except websockets.exceptions.ConnectionClosedOK:
@@ -436,7 +440,22 @@ class Connection(metaclass=CantTouchThis):
                     await self.disconnect()
                     break
                 except asyncio.TimeoutError as e:
-                    await asyncio.sleep(0.05)
+                    # Old timeout handler, used when self.websocket.recv() was wrapped in asyncio.wait_for
+                    # with a short timeout.
+                    # asyncio.sleep(0) is intentional here.
+                    #
+                    # Using asyncio.sleep(x > 0) relies on the event loop timer mechanism.
+                    # Under heavy I/O load (frequent websocket recv + wait_for with short timeouts),
+                    # the event loop may starve timer callbacks, causing sleep(x) and wait_for timeouts
+                    # to never fire even when their scheduled time has already passed.
+                    #
+                    # asyncio.sleep(0) does not use timers. It yields control immediately by scheduling
+                    # the continuation in the ready queue, guaranteeing that other tasks and callbacks
+                    # get a chance to run.
+                    #
+                    # This prevents event loop starvation and avoids indefinite hangs observed with
+                    # sleep(x) in tight websocket polling loops.
+                    await asyncio.sleep(0)
                     continue
                 except (Exception,) as e:
                     logger.info(

@@ -339,7 +339,7 @@ class Tab(Connection):
         :param text: text to search for. note: script contents are also considered text
         :type text: str
 
-        :param timeout: raise timeout exception when after this many seconds nothing is found.
+        :param timeout: return empty list when after this many seconds nothing is found.
         :type timeout: float,int
         """
         loop = asyncio.get_running_loop()
